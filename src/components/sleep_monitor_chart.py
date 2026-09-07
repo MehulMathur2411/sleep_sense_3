@@ -54,7 +54,7 @@ from .plot_psg_data import (  # noqa: E402
 ACTIVE_SIGNAL_CONFIGS = [
     ("Body Position", "#3b82f6", 0.5, 10, 50, 0, 5),
     ("Airflow", "#8b5cf6", 0.3, 15, 50, 0, 1500),
-    ("Snoring", "#ef4444", 1.0, 8, 50, 0, 1000),
+    ("Snoring", "#ef4444", 1.0, 8, 50, 100, 400),
     ("Thorax", "#f59e0b", 0.2, 5, 50, 0, 4095),
     # ("Abdomen", "#10b981", 0.1, 2, 90, 0, 80),
     ("SpO2", "#06b6d4", 1.5, 12, 50, 60, 110),
@@ -2243,7 +2243,7 @@ class SleepMonitorChart(QWidget):
         plot_widget.zoom_y_min_span = max(floor_span / self.AXIS_MAX_ZOOM_IN, 1e-3)
         # Cap zoom-out to a few multiples of the actual data span so
         # auto-range charts cannot be blown up until they look flat again.
-        plot_widget.zoom_y_max_span = min(limit_max - limit_min, span * 6.0)
+        plot_widget.zoom_y_max_span = min(limit_max - limit_min, span * self.AXIS_MAX_ZOOM_OUT)
 
     def _robust_core_values(self, values):
         """Return finite samples with far-out outliers removed.
@@ -2308,6 +2308,7 @@ class SleepMonitorChart(QWidget):
     # narrow peaks do not get mistaken for outliers.
     AXIS_MIN_RECURRING_EXCURSIONS = 4
     AXIS_MAX_ZOOM_IN = 1.5
+    AXIS_MAX_ZOOM_OUT = 2.5
     AXIS_FIT_PAD = 0.08
 
     def _nice_axis_step(self, span, divisions=None):
@@ -2456,10 +2457,7 @@ class SleepMonitorChart(QWidget):
         if zoom_y_range is not None:
             return
 
-        fallback_min, fallback_max = SIGNAL_Y_RANGES.get(chart_name, (0.0, 100.0))
-        raw_min, raw_max = self._windowed_axis_range_from_values(
-            y_values, fallback_min, fallback_max
-        )
+        raw_min, raw_max = self.get_signal_auto_axis_range(chart_name)
         y_min, y_max = self._stable_axis_range(plot_widget, raw_min, raw_max)
 
         if getattr(plot_widget, "stable_y_range", None) == (y_min, y_max):
@@ -5101,6 +5099,8 @@ class SleepMonitorChart(QWidget):
             plot_widget.zoom_y_range = (new_y_min, new_y_max)
             print(f"Stored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
 
+        self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
+
     def zoom_vertical_at_ratio(self, plot_widget, zoom_factor, anchor_ratio):
         """Zoom vertically while keeping the chosen relative Y position visually anchored."""
         current_range = plot_widget.getViewBox().viewRange()
@@ -5131,6 +5131,7 @@ class SleepMonitorChart(QWidget):
             plot_widget.setRange(yRange=[new_y_min, new_y_max])
 
         plot_widget.zoom_y_range = (new_y_min, new_y_max)
+        self._pin_axis_tick_spacing(plot_widget, new_y_min, new_y_max)
         print(f"Stored anchored zoom range for {chart_name}: {new_y_min} - {new_y_max}")
 
     def handle_container_wheel_zoom(self, event, plot_widget):
@@ -5488,7 +5489,7 @@ class SleepMonitorChart(QWidget):
             drawn = drawn[real]
             times = times[real]
 
-            mean_value = float(np.mean(values))
+            mean_value = float(np.median(values))
 
             # Anchor the number to a REAL point on the trace instead of to the
             # bucket's mean position. When a bucket straddles a step (SpO2 is a
@@ -7333,6 +7334,7 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
                 min_duration_sec=60,
             )
             all_segments = sensor_off_segments + breathing_stopped_segments
+            self.sensor_off_shade_segments = list(sensor_off_segments)
 
             dbg("\n" + "=" * 60)
             dbg("AIRFLOW MASKING DEBUG:")
@@ -7369,14 +7371,6 @@ Events <=92: {self.spo2_statistics['desaturation_events']}
             # Always start from the enhanced signal so repeated detection does
             # not calculate a new baseline from an already masked trace.
             display_source = signals.get("airflow_enhanced", signals["airflow_display"])
-            original_length = len(display_source)
-            signals["airflow_display"] = self._mask_airflow_during_sensor_off(
-                display_source, time_data, all_segments
-            )
-            dbg(
-                f"Applied masking: {len(sensor_off_segments)} sensor-off + "
-                f"{len(breathing_stopped_segments)} breathing-stopped = "
-                f"{len(all_segments)} total, airflow length: {original_length}"
-            )
+            signals["airflow_display"] = np.array(display_source, dtype=float, copy=True)
         except Exception as error:
             dbg(f"Error applying sensor-off masking: {error}")

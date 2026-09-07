@@ -430,7 +430,7 @@ APNEA_CORE_WINDOW_SEC = 1.0
 # Effort belts: a real breath is a peak with prominence >= this fraction of the
 # baseline breath amplitude. Quantisation noise never clears it, so counting
 # breaths tells "effort absent" apart from "small but present effort".
-EFFORT_BREATH_PROMINENCE_RATIO = 0.35
+EFFORT_BREATH_PROMINENCE_RATIO = 0.15
 EFFORT_MIN_BREATH_RATE_PER_MIN = 6.0
 # Breathing is RHYTHMIC. One lone blip is not a breath -- on a low-resolution
 # belt a single quantisation step can clear the prominence test and, divided by
@@ -479,6 +479,13 @@ HYPOPNEA_MAX_NIGHT_REF_RATIO = 0.70
 # baseline is treated as an apnea candidate because the weak reference makes
 # the measured drop look smaller than it is.
 DEGRADED_BASELINE_NIGHT_RATIO = 0.50
+# Recording-edge and displacement gates.
+RECORDING_EDGE_SEC = 10.0
+POST_MOVEMENT_LOOKBACK_SEC = 15.0
+POST_MOVEMENT_BELT_RATIO = 3.0
+POST_MOVEMENT_POSITION_SEC = 30.0
+DISPLACEMENT_SEGMENT_MIN_SEC = 180.0
+DISPLACEMENT_GAP_SEC = 60.0
 NIGHT_REFERENCE_MIN_COVERAGE = 0.30
 
 # Secondary evidence and review-tier settings. These support review and
@@ -500,6 +507,8 @@ POSITION_FLICKER_MIN_CHANGES = 3
 MOVEMENT_MIN_OVERLAP_RATIO = 0.30
 REVIEW_CLUSTER_GAP_SEC = 60.0
 REVIEW_HYPOPNEA_MIN_DROP_PERCENT = 50.0
+NEAR_MISS_DESAT_MIN = 1.0
+NEAR_MISS_DESAT_MIN_MODERATE_DROP = 2.0
 REVIEW_SUSTAINED_SEC = 30.0
 SENSOR_OFF_ADJACENT_SEC = 60.0
 
@@ -1530,6 +1539,27 @@ def classify_rule_event(
     return "NO_EVENT"
 
 
+def _raw_spo2_dip(time_sec, spo2, start_sec, end_sec):
+    """Return the raw pre-event median minus the nearby SpO2 minimum."""
+    if spo2 is None:
+        return 0.0
+    t = np.asarray(time_sec, dtype=float)
+    s = np.asarray(spo2, dtype=float)
+    pre = (
+        (t >= start_sec - DESAT_BASELINE_LOOKBACK_SEC)
+        & (t < start_sec)
+        & np.isfinite(s)
+    )
+    post = (
+        (t >= start_sec)
+        & (t <= end_sec + DESAT_LINK_WINDOW_SEC)
+        & np.isfinite(s)
+    )
+    if not pre.any() or not post.any():
+        return 0.0
+    return float(np.nanmedian(s[pre]) - np.nanmin(s[post]))
+
+
 def detect_desaturations(
     time_sec: np.ndarray,
     spo2: np.ndarray,
@@ -1572,47 +1602,53 @@ def detect_desaturations(
     lookback_samples = max(1, int(round(float(lookback_sec) / sample_dt)))
     recent_samples = max(1, int(round(DESAT_RECENT_BASELINE_SEC / sample_dt)))
 
-    # Both trailing baselines are computed once for the full recording with a
-    # vectorized rolling quantile. The old per-sample np.nanpercentile() loop
-    # dominated runtime on long studies. shift(1) keeps each baseline strictly
-    # before the current sample, matching the original slice spo2_arr[start:index].
-    spo2_series = pd.Series(spo2_arr)
-    baseline_series = (
-        spo2_series.rolling(window=lookback_samples, min_periods=1)
-        .quantile(0.90)
-        .shift(1)
-        .to_numpy(dtype=float)
-    )
-    recent_series = (
-        spo2_series.rolling(window=recent_samples, min_periods=1)
-        .quantile(0.90)
-        .shift(1)
-        .to_numpy(dtype=float)
-    )
+    # Use a second pass with already-detected desaturations blanked out so a
+    # previous dip cannot drag down the baseline of the next event.
+    min_valid = max(1, int(round(lookback_samples * 0.2)))
 
-    active = np.zeros(sample_count, dtype=bool)
-    in_desaturation = False
+    def _trailing_median(values: np.ndarray, window: int, min_periods: int) -> np.ndarray:
+        return (
+            pd.Series(values)
+            .rolling(window=window, min_periods=min_periods)
+            .quantile(0.50)
+            .shift(1)
+            .to_numpy(dtype=float)
+        )
 
-    for index, value in enumerate(spo2_arr):
-        if not np.isfinite(value):
-            continue
-        baseline_spo2 = baseline_series[index]
-        if not np.isfinite(baseline_spo2) or baseline_spo2 <= 0.0:
-            continue
-        if baseline_spo2 - float(value) < float(drop_percent):
-            in_desaturation = False
-            continue
-
-        if not in_desaturation:
-            # ONSET only: a drift has already carried the recent level down, so
-            # the fall does not show against the last few seconds. A real
-            # desaturation still does -- SpO2 is high right up to the fall.
-            recent_baseline = recent_series[index]
-            if np.isfinite(recent_baseline) and recent_baseline - float(value) < float(drop_percent):
+    def _desat_pass(baseline_series: np.ndarray, recent_series: np.ndarray) -> np.ndarray:
+        active = np.zeros(sample_count, dtype=bool)
+        in_desaturation = False
+        for index, value in enumerate(spo2_arr):
+            if not np.isfinite(value):
                 continue
-            in_desaturation = True
+            baseline_spo2 = baseline_series[index]
+            if not np.isfinite(baseline_spo2) or baseline_spo2 <= 0.0:
+                continue
+            if baseline_spo2 - float(value) < float(drop_percent):
+                in_desaturation = False
+                continue
+            if not in_desaturation:
+                # ONSET only: a drift has already carried the recent level down, so
+                # the fall does not show against the last few seconds. A real
+                # desaturation still does -- SpO2 is high right up to the fall.
+                recent_baseline = recent_series[index]
+                if np.isfinite(recent_baseline) and recent_baseline - float(value) < float(drop_percent):
+                    continue
+                in_desaturation = True
+            active[index] = True
+        return active
 
-        active[index] = True
+    plain_baseline = _trailing_median(spo2_arr, lookback_samples, 1)
+    plain_recent = _trailing_median(spo2_arr, recent_samples, 1)
+    active_first = _desat_pass(plain_baseline, plain_recent)
+
+    stable_values = spo2_arr.copy()
+    stable_values[active_first] = np.nan
+    stable_baseline = _trailing_median(stable_values, lookback_samples, min_valid)
+    stable_recent = _trailing_median(stable_values, recent_samples, 1)
+    baseline_series = np.where(np.isfinite(stable_baseline), stable_baseline, plain_baseline)
+    recent_series = np.where(np.isfinite(stable_recent), stable_recent, plain_recent)
+    active = _desat_pass(baseline_series, recent_series)
 
     events: list[dict[str, Any]] = []
     for start_index, end_index, duration_sec in _segment_mask(active, time_arr, min_event_sec):
@@ -1756,6 +1792,11 @@ def detect_apnea_events_from_dataframe(
     if baseline_airflow_amplitude <= 0:
         baseline_airflow_amplitude = airflow_reduction_range
     effort_baseline = _compute_effort_baseline(thorax, abdomen, baseline_mask, estimated_fs)
+    thorax_typical_breath = 0.0
+    if thorax is not None and len(thorax) == len(time_sec):
+        thorax_typical_breath = float(
+            np.nanmedian(_continuous_breath_amplitude(thorax, estimated_fs, 5.0))
+        )
 
     apnea_threshold = baseline_airflow_reference * (1.0 - AASM_APNEA_DROP_PERCENT / 100.0)
     hypopnea_threshold = baseline_airflow_reference * (1.0 - AASM_HYPOPNEA_DROP_PERCENT / 100.0)
@@ -2155,24 +2196,11 @@ def detect_apnea_events_from_dataframe(
                 spo2_usable=spo2_usable and spo2_measurable,
             )
             promoted = False
-            if (
-                expected_label == "HYPOPNEA"
-                and detected_rule_label == "HYPOPNEA"
-                and event_reference_amplitude > 0
-                and night_amplitude_ratio <= APNEA_MAX_NIGHT_REF_RATIO
+            airflow_unreliable = bool(
+                event_reference_amplitude > 0
                 and event_baseline_airflow
                 < DEGRADED_BASELINE_NIGHT_RATIO * event_reference_amplitude
-                and float(duration_sec) >= MIN_EVENT_SEC
-            ):
-                print(
-                    f"Promoted {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s "
-                    f"hypopnea -> apnea: airflow {event_airflow_amplitude:.1f} is at the "
-                    f"noise floor ({night_amplitude_ratio * 100:.0f}% of typical breathing "
-                    f"{event_reference_amplitude:.0f}); local baseline {event_baseline_airflow:.1f} "
-                    "was already degraded"
-                )
-                detected_rule_label = "APNEA_CANDIDATE"
-                promoted = True
+            )
             secondary = _secondary_evidence(
                 start_index, end_index, core_start_index, core_end_index
             )
@@ -2208,6 +2236,34 @@ def detect_apnea_events_from_dataframe(
                 "desat_start_sec": float(linked_desat["start_sec"]) if linked_desat else None,
                 **secondary,
             }
+            if airflow_unreliable and detected_rule_label != "NO_EVENT":
+                already_queued = any(
+                    min(float(item["end_sec"]), candidate_record["end_sec"])
+                    - max(float(item["start_sec"]), candidate_record["start_sec"])
+                    > 0.5 * float(duration_sec)
+                    for item in review_candidates
+                )
+                if already_queued:
+                    continue
+                candidate_record["rule_label"] = (
+                    "HYPOPNEA" if detected_rule_label == "HYPOPNEA" else "APNEA"
+                )
+                candidate_record["airflow_unreliable"] = True
+                candidate_record["review_reason"] = (
+                    f"{drop_percent:.0f}% drop for {float(duration_sec):.0f}s, but the airflow "
+                    f"baseline before it was only {event_baseline_airflow:.1f} = "
+                    f"{event_baseline_airflow / event_reference_amplitude * 100:.0f}% of this "
+                    f"patient's typical breathing ({event_reference_amplitude:.0f}) -- cannula "
+                    "loose/displaced, airflow cannot score this; check belt + SpO2 manually"
+                )
+                review_candidates.append(candidate_record)
+                print(
+                    f"Review {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s: airflow "
+                    f"baseline {event_baseline_airflow:.1f} is at noise level "
+                    f"({event_baseline_airflow / event_reference_amplitude * 100:.0f}% of typical); "
+                    "not scored automatically"
+                )
+                continue
             if detected_rule_label == "NO_EVENT":
                 spo2_dropout_hit = (
                     secondary["spo2_dropout_sec"] >= SPO2_DROPOUT_MIN_SEC
@@ -2230,6 +2286,48 @@ def detect_apnea_events_from_dataframe(
                         )
                     )
                     review_candidates.append(candidate_record)
+                elif (
+                    expected_label == "HYPOPNEA"
+                    and not airflow_unreliable
+                    and (
+                        drop_percent >= REVIEW_HYPOPNEA_MIN_DROP_PERCENT
+                        or (
+                            drop_percent >= AASM_HYPOPNEA_DROP_PERCENT
+                            and _raw_spo2_dip(
+                                time_sec, spo2,
+                                float(time_sec[start_index]),
+                                float(time_sec[end_index]),
+                            ) >= NEAR_MISS_DESAT_MIN_MODERATE_DROP
+                        )
+                    )
+                    and night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
+                    and not any(
+                        min(float(item["end_sec"]), float(time_sec[end_index]))
+                        - max(float(item["start_sec"]), float(time_sec[start_index]))
+                        > 0.5 * float(duration_sec)
+                        for item in review_candidates
+                    )
+                    and spo2_usable and spo2_measurable
+                    and spo2_drop < AASM_HYPOPNEA_SPO2_DESAT_MIN
+                    and _raw_spo2_dip(
+                        time_sec, spo2,
+                        float(time_sec[start_index]),
+                        float(time_sec[end_index]),
+                    ) >= NEAR_MISS_DESAT_MIN
+                ):
+                    spo2_drop = _raw_spo2_dip(
+                        time_sec, spo2,
+                        float(time_sec[start_index]),
+                        float(time_sec[end_index]),
+                    )
+                    candidate_record["rule_label"] = "HYPOPNEA"
+                    candidate_record["review_reason"] = (
+                        f"{drop_percent:.0f}% airflow drop for {float(duration_sec):.0f}s, but no "
+                        f">={AASM_HYPOPNEA_SPO2_DESAT_MIN:.0f}% desaturation could be scored "
+                        f"against it (nearby SpO2 dip {spo2_drop:.0f} pt by min-vs-median) -- "
+                        "oximeter reads every 16 s with +/-2 pt jitter; confirm manually"
+                    )
+                    review_candidates.append(candidate_record)
                 continue
 
             demoted = False
@@ -2237,14 +2335,7 @@ def detect_apnea_events_from_dataframe(
                 detected_rule_label == "APNEA_CANDIDATE"
                 and night_amplitude_ratio > APNEA_MAX_NIGHT_REF_RATIO
             ):
-                if effort_corroborated:
-                    print(
-                        f"Kept apnea {time_sec[start_index]:.0f}s-"
-                        f"{time_sec[end_index]:.0f}s despite amplitude "
-                        f"{night_amplitude_ratio * 100:.0f}% of typical breathing: "
-                        "effort belt also dropped (periodic-breathing pattern)"
-                    )
-                elif (
+                if (
                     night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
                     and spo2_usable
                     and spo2_measurable
@@ -2270,6 +2361,38 @@ def detect_apnea_events_from_dataframe(
                         f"effort belt fell to {core_effort_ratio * 100:.0f}% of baseline"
                     )
                 else:
+                    raw_dip = _raw_spo2_dip(
+                        time_sec, spo2,
+                        float(time_sec[start_index]),
+                        float(time_sec[end_index]),
+                    )
+                    overlaps_review = any(
+                        min(float(item["end_sec"]), float(time_sec[end_index]))
+                        - max(float(item["start_sec"]), float(time_sec[start_index]))
+                        > 0.5 * float(duration_sec)
+                        for item in review_candidates
+                    )
+                    if (
+                        not airflow_unreliable
+                        and night_amplitude_ratio <= HYPOPNEA_MAX_NIGHT_REF_RATIO
+                        and spo2_usable and spo2_measurable
+                        and raw_dip >= NEAR_MISS_DESAT_MIN
+                        and not overlaps_review
+                    ):
+                        candidate_record["rule_label"] = "HYPOPNEA"
+                        candidate_record["review_reason"] = (
+                            f"{drop_percent:.0f}% airflow drop for {float(duration_sec):.0f}s "
+                            f"({night_amplitude_ratio * 100:.0f}% of typical breathing left), but no "
+                            f">={AASM_HYPOPNEA_SPO2_DESAT_MIN:.0f}% desaturation could be scored "
+                            f"against it (nearby SpO2 dip {raw_dip:.0f} pt by min-vs-median) -- "
+                            "oximeter reads every 16 s with +/-2 pt jitter; confirm manually"
+                        )
+                        review_candidates.append(candidate_record)
+                        print(
+                            f"Review {time_sec[start_index]:.0f}s-{time_sec[end_index]:.0f}s: "
+                            f"{drop_percent:.0f}% drop but SpO2 dip only {raw_dip:.0f}%"
+                        )
+                        continue
                     print(
                         f"Rejected apnea {time_sec[start_index]:.0f}s-"
                         f"{time_sec[end_index]:.0f}s: amplitude "
@@ -2479,6 +2602,94 @@ def detect_apnea_events_from_dataframe(
                 "(airflow was sensor noise, not breathing)"
             )
             continue
+        if event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"} and (
+            event_end >= float(time_sec[-1]) - RECORDING_EDGE_SEC
+        ):
+            event["review_reason"] = (
+                f"{event_duration:.0f}s event runs into the end of the recording "
+                f"({float(time_sec[-1]) - event_end:.0f}s before the file ends) -- "
+                "device removal, not scored automatically"
+            )
+            long_events_for_review.append(event)
+            print(
+                f"Review {event_start:.0f}s-{event_end:.0f}s: event reaches the end of "
+                "the recording, not scored automatically"
+            )
+            continue
+
+        displaced_after = None
+        for segment in sensor_off_segments:
+            seg_start = float(segment["start_sec"])
+            seg_len = float(segment["end_sec"]) - seg_start
+            if (
+                seg_len >= DISPLACEMENT_SEGMENT_MIN_SEC
+                and 0.0 <= seg_start - event_end <= DISPLACEMENT_GAP_SEC
+            ):
+                displaced_after = segment
+                break
+        if displaced_after is not None and event["rule_label"] in {
+            "OSA", "CSA", "MSA", "HYPOPNEA"
+        }:
+            seg_len = float(displaced_after["end_sec"]) - float(displaced_after["start_sec"])
+            event["review_reason"] = (
+                f"{event_duration:.0f}s drop followed {float(displaced_after['start_sec']) - event_end:.0f}s "
+                f"later by {seg_len / 60:.0f} min with no breathing rhythm in the airflow -- "
+                "this is the moment the cannula was displaced; confirm on belt + SpO2"
+            )
+            long_events_for_review.append(event)
+            print(
+                f"Review {event_start:.0f}s-{event_end:.0f}s: airflow lost right after this "
+                f"event for {seg_len:.0f}s (cannula displacement), not scored automatically"
+            )
+            continue
+
+        if (
+            thorax_typical_breath > 0
+            and event["rule_label"] in {"OSA", "CSA", "MSA", "HYPOPNEA"}
+            and not event.get("spo2_confirmed")
+        ):
+            pre_mask = (time_sec >= event_start - POST_MOVEMENT_LOOKBACK_SEC) & (
+                time_sec < event_start
+            )
+            if np.any(pre_mask):
+                smooth_n = max(3, int(round(estimated_fs * 2.0)))
+                slow_belt = (
+                    pd.Series(thorax[pre_mask])
+                    .rolling(
+                        smooth_n,
+                        center=True,
+                        min_periods=max(2, smooth_n // 4),
+                    )
+                    .mean()
+                    .to_numpy()
+                )
+                excursion = float(np.nanmax(slow_belt) - np.nanmin(slow_belt))
+                movement_signature = None
+                if excursion >= POST_MOVEMENT_BELT_RATIO * thorax_typical_breath:
+                    movement_signature = (
+                        f"a body movement on the belt "
+                        f"({excursion / thorax_typical_breath:.0f}x a normal breath, slow)"
+                    )
+                elif body_position is not None and len(body_position) == len(time_sec):
+                    pos_mask = (time_sec >= event_start - POST_MOVEMENT_POSITION_SEC) & (
+                        time_sec <= event_end
+                    )
+                    if np.any(pos_mask) and np.any(np.diff(body_position[pos_mask]) != 0):
+                        movement_signature = "a body-position change"
+                if movement_signature is not None:
+                    event["review_reason"] = (
+                        f"{event_duration:.0f}s pause starting within "
+                        f"{POST_MOVEMENT_LOOKBACK_SEC:.0f}s of {movement_signature} and no "
+                        "confirmed desaturation -- post-movement pause / signals still "
+                        "settling; confirm manually"
+                    )
+                    long_events_for_review.append(event)
+                    print(
+                        f"Review {event_start:.0f}s-{event_end:.0f}s: follows "
+                        f"{movement_signature}, no desat"
+                    )
+                    continue
+
         trust_spo2 = False
         if event.get("spo2_confirmed"):
             trust_spo2 = True

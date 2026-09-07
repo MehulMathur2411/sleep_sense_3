@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QFileDialog, QListWidget, QListWidgetItem, QScrollArea,
     QMessageBox, QSizePolicy, QComboBox, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem
+    QStyleOptionViewItem, QAbstractItemView
 )
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QPainter, QPixmap, QColor
@@ -36,12 +36,7 @@ class _DetectedEventDelegate(QStyledItemDelegate):
 
         rect = option.rect.adjusted(8, 4, -8, -4)
         lines = str(index.data(Qt.DisplayRole) or "").split("\n", 1)
-        normal_color = (
-            option.palette.highlightedText().color()
-            if option.state & QStyle.State_Selected
-            else option.palette.text().color()
-        )
-        painter.setPen(normal_color)
+        painter.setPen(option.palette.text().color())
         painter.drawText(rect.left(), rect.top(), rect.width(), rect.height(), Qt.AlignTop, lines[0])
 
         if len(lines) < 2:
@@ -573,17 +568,20 @@ class PatientInfoWidget(QWidget):
 
     def _build_raw_file_row_widget(self, filename: str, timestamp_iso: str) -> QWidget:
         row_widget = QWidget()
+        row_widget.setFixedHeight(52)
         row_layout = QVBoxLayout(row_widget)
         row_layout.setContentsMargins(8, 6, 8, 4)
-        row_layout.setSpacing(4)
+        row_layout.setSpacing(2)
 
         filename_label = QLabel(filename)
-        filename_label.setWordWrap(True)
+        filename_label.setFixedHeight(17)
+        filename_label.setWordWrap(False)
         filename_label.setStyleSheet("color: #111827; font-size: 12px; font-weight: 500; background: transparent;")
         row_layout.addWidget(filename_label)
 
         timestamp_label = QLabel(timestamp_iso)
-        timestamp_label.setWordWrap(True)
+        timestamp_label.setFixedHeight(16)
+        timestamp_label.setWordWrap(False)
         timestamp_label.setStyleSheet("color: #374151; font-size: 11px; background: transparent;")
         row_layout.addWidget(timestamp_label)
 
@@ -607,16 +605,36 @@ class PatientInfoWidget(QWidget):
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(12, 12, 12, 12)
         frame_layout.setSpacing(12)
+        frame_layout.setAlignment(Qt.AlignTop)
 
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(0)
+
         title = QLabel("Detected Events")
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #111827;")
+        title.setFixedHeight(24)
+        title.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: 700;
+                color: #111827;
+                background: transparent;
+            }
+        """)
         header.addWidget(title)
         header.addStretch()
 
         self.detected_count_label = QLabel("0")
         self.detected_count_label.setVisible(False)
-        self.detected_count_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #dc2626;")
+        self.detected_count_label.setFixedHeight(24)
+        self.detected_count_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: 700;
+                color: #dc2626;
+                background: transparent;
+            }
+        """)
         header.addWidget(self.detected_count_label)
         frame_layout.addLayout(header)
 
@@ -669,6 +687,7 @@ class PatientInfoWidget(QWidget):
         self.detected_events_list.setMinimumHeight(0)
         self.detected_events_list.setMaximumHeight(500)
         self.detected_events_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.detected_events_list.setSelectionMode(QAbstractItemView.NoSelection)
         self.detected_events_list.setVisible(False)
         self.detected_events_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.detected_events_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -688,16 +707,12 @@ class PatientInfoWidget(QWidget):
             }
             QListWidget::item {
                 background-color: white;
+                color: #111827;
                 border: 1px solid #e5e7eb;
                 border-radius: 4px;
                 padding: 6px 8px;
                 margin: 1px;
                 min-height: 26px;
-            }
-            QListWidget::item:selected {
-                background-color: #eff6ff;
-                color: #1e40af;
-                border: 1px solid #93c5fd;
             }
             QListWidget::item:hover {
                 background-color: #f1f5f9;
@@ -719,8 +734,9 @@ class PatientInfoWidget(QWidget):
         self.raw_file_list.setVisible(raw_count > 0)
 
         # Render newest on top
-        item_text = f"{filename}\n{timestamp_iso}"
-        item = QListWidgetItem(item_text)
+        # The custom row widget renders the file details; keep the item's own
+        # text empty so QListWidget does not paint a second copy underneath it.
+        item = QListWidgetItem()
         item.setData(Qt.UserRole, file_path)
         item.setToolTip(file_path)
         row_widget = self._build_raw_file_row_widget(filename, timestamp_iso)

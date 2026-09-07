@@ -664,6 +664,7 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         ('FONTNAME', (0,1), (-1,-1), 'Helvetica'),
         ('FONTSIZE', (0,1), (-1,-1), 7),
         ('ALIGN', (0,1), (-1,-1), 'LEFT'),
+        ('VALIGN', (0,1), (-1,-1), 'MIDDLE'),
         ('LEFTPADDING', (0,1), (-1,-1), 7),
         ('RIGHTPADDING', (0,1), (-1,-1), 7),
         ('TOPPADDING', (0,1), (-1,-1), 5),
@@ -754,93 +755,59 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
     page1_elements.append(Spacer(1, 12))
 
     # ---------------- Severity Meter ----------------
-     # ---------------- SEVERITY INDICATOR ----------------
+    # ---------------- SEVERITY INDICATOR ----------------
     def create_severity_meter(value=0.0):
         width = page1_content_width - 16
         height = 20
         total = 50
+        bar_y = 32  # lifted from y=20 to leave room for the pointer + label above the bar
 
-        d = Drawing(width, 58)
+        d = Drawing(width, 86)
 
-        # ---- Color Segments ----
         green_w  = (5 / total) * width
         yellow_w = (10 / total) * width
         orange_w = (10 / total) * width
         red_w    = (25 / total) * width
 
         x = 0
- 
-        # Green (0-5)
-        d.add(Rect(
-            x, 20, green_w, height,
-            fillColor=colors.HexColor("#38B000"),
-            strokeColor=None
-        ))
+
+        d.add(Rect(x, bar_y, green_w, height, fillColor=colors.HexColor("#38B000"), strokeColor=None))
         x += green_w
 
-        # Yellow (5-15)
-        d.add(Rect(
-            x, 20, yellow_w, height,
-            fillColor=colors.HexColor("#FFFF00"),
-            strokeColor=None
-        ))
+        # softened from pure #FFFF00 for better contrast/readability
+        d.add(Rect(x, bar_y, yellow_w, height, fillColor=colors.HexColor("#FBC02D"), strokeColor=None))
         x += yellow_w
 
-        # Orange (15-25)
-        d.add(Rect(
-            x, 20, orange_w, height,
-            fillColor=colors.HexColor("#FFA500"),
-            strokeColor=None
-        ))
+        d.add(Rect(x, bar_y, orange_w, height, fillColor=colors.HexColor("#FFA500"), strokeColor=None))
         x += orange_w
 
-        # Dark Red (25-50)
-        d.add(Rect(
-            x, 20, red_w, height,
-            fillColor=colors.HexColor("#FF0000"),
-            strokeColor=None
-        ))
+        d.add(Rect(x, bar_y, red_w, height, fillColor=colors.HexColor("#FF0000"), strokeColor=None))
 
-        # Outer Border
-        d.add(Rect(
-            0, 20, width, height,
-            fillColor=None,
-            strokeColor=colors.black,
-            strokeWidth=1
-        ))
+        d.add(Rect(0, bar_y, width, height, fillColor=None, strokeColor=colors.black, strokeWidth=1))
 
-        # ---- Current Value ----
+        # pointer + label above the bar (same pattern as the Snoring bar)
         marker_x = (value / total) * width
-        marker_x = max(18, min(width - 30, marker_x))
+        marker_x = max(22, min(width - 34, marker_x))
+        bar_top = bar_y + height
 
-        d.add(String(
-            marker_x,
-            41,
-            "AHI",
-            fontSize=8,
-            fillColor=CARD_TEXT_MUTED,
-            textAnchor="middle",
-        ))
-
-        d.add(String(
-            marker_x,
-            30,
-            f"{value:.1f}",
-            fontSize=10,
+        d.add(Polygon(
+            [
+                marker_x, bar_top + 2,
+                marker_x - 5, bar_top + 9,
+                marker_x + 5, bar_top + 9,
+            ],
+            strokeColor=colors.black,
             fillColor=colors.black,
-            textAnchor="middle",
+        ))
+        d.add(String(marker_x, bar_top + 23, "AHI", fontSize=7.5, fillColor=CARD_TEXT_MUTED, textAnchor="middle"))
+        d.add(String(
+            marker_x, bar_top + 11, f"{value:.1f}",
+            fontName="Helvetica-Bold", fontSize=10.5, fillColor=colors.black, textAnchor="middle",
         ))
 
-        # ---- Bottom Scale ----
         for i in range(0, 51, 10):
             label_x = (i / total) * width
-
-            d.add(String(
-                label_x - 5,
-                5,
-                str(i),
-                fontSize=8
-            ))
+            d.add(String(label_x - 5, bar_y - 15, str(i), fontSize=8))
 
         return d
 
@@ -1014,7 +981,8 @@ def generate_sleep_report(pdf_path=None, patient_data=None, analysis_results=Non
         ["SpO2 < 85% duration", oximetry.get("duration_below_85_pct_display", "0.0%"), oximetry.get("duration_below_85_display", "0 sec")],
     ]
 
-    oxi_col_widths = [LEFT_SECTION_WIDTH * ratio for ratio in (0.69, 0.11, 0.20)]
+    # "Coverage" was clipped before (0.11 was narrower than the word itself)
+    oxi_col_widths = [LEFT_SECTION_WIDTH * ratio for ratio in (0.62, 0.18, 0.20)]
     oxi_table = Table(oxi_data, colWidths=oxi_col_widths)
 
     oxi_table.setStyle(TableStyle([

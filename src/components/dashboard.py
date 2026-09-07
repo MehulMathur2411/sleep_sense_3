@@ -131,6 +131,8 @@ class InterpretationOptionRow(QWidget):
 class InterpretationDialog(QDialog):
     """Selectable interpretation dialog that feeds manual notes into the report."""
 
+    CUSTOM_NOTE_LIMIT = 300
+
     def __init__(self, selected_items=None, custom_note="", parent=None):
         super().__init__(parent)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
@@ -197,12 +199,21 @@ class InterpretationDialog(QDialog):
             "color: #185FA5; font-size: 13px; font-weight: bold; "
             "border-bottom: 1px solid #ddd; padding-bottom: 4px;"
         )
-        body_layout.addWidget(custom_label)
+        custom_header = QHBoxLayout()
+        custom_header.addWidget(custom_label, 1)
+        self.custom_note_count = QLabel()
+        self.custom_note_count.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.custom_note_count.setStyleSheet("color: #6b7280; font-size: 11px;")
+        custom_header.addWidget(self.custom_note_count)
+        body_layout.addLayout(custom_header)
 
         self.custom_text = QTextEdit()
+        self.custom_text.setAcceptRichText(False)
         self.custom_text.setPlaceholderText("Type a custom interpretation note to add to the report...")
         self.custom_text.setFixedHeight(70)
-        self.custom_text.setPlainText(self.custom_note)
+        self.custom_text.setPlainText(self.custom_note[:self.CUSTOM_NOTE_LIMIT])
+        self.custom_text.textChanged.connect(self._update_custom_note_count)
+        self._update_custom_note_count()
         self.custom_text.setStyleSheet(
             "border: 1px solid #ddd; border-radius: 4px; padding: 6px; font-size: 13px;"
         )
@@ -255,6 +266,28 @@ class InterpretationDialog(QDialog):
             mild_row.checkbox.stateChanged.connect(self._sync_conditional_options)
         self._update_count()
         self._sync_conditional_options()
+
+    def _update_custom_note_count(self):
+        text = self.custom_text.toPlainText()
+        if len(text) > self.CUSTOM_NOTE_LIMIT:
+            cursor = self.custom_text.textCursor()
+            # Qt cursor positions use UTF-16 units, including for emoji.
+            position = cursor.position()
+            prefix = text.encode("utf-16-le")[:position * 2].decode("utf-16-le")
+            end = len(prefix)
+            start = max(0, end - (len(text) - self.CUSTOM_NOTE_LIMIT))
+            if end - start < len(text) - self.CUSTOM_NOTE_LIMIT:
+                end = start + len(text) - self.CUSTOM_NOTE_LIMIT
+            cursor.setPosition(len(text[:start].encode("utf-16-le")) // 2)
+            cursor.setPosition(len(text[:end].encode("utf-16-le")) // 2, cursor.KeepAnchor)
+            was_blocked = self.custom_text.blockSignals(True)
+            cursor.beginEditBlock()
+            cursor.removeSelectedText()
+            cursor.endEditBlock()
+            self.custom_text.setTextCursor(cursor)
+            self.custom_text.blockSignals(was_blocked)
+            text = self.custom_text.toPlainText()
+        self.custom_note_count.setText(f"{len(text)}/{self.CUSTOM_NOTE_LIMIT} characters")
 
     def _update_count(self):
         selected_count = sum(1 for row in self.option_rows if row.is_checked())
@@ -646,7 +679,7 @@ class ScreenshotOverlayWidget(QWidget):
         painter.setFont(hint_font)
         painter.setPen(QColor("#475569"))
         painter.drawText(header.adjusted(18, 32, -18, -10), Qt.AlignCenter,
-                         "Drag to select. Release mouse, then click Capture Selected Area.")
+                         "Drag to select, then click Capture Area.")
 
         rect = self.selection_rect()
         if not rect.isNull():
@@ -669,7 +702,7 @@ class ScreenshotOverlayWidget(QWidget):
         painter.setFont(hint_font)
         painter.setPen(QColor("#334155"))
         painter.drawText(hint_rect, Qt.AlignCenter | Qt.AlignVCenter,
-                         "Use the buttons below to confirm or cancel.")
+                         "Capture the selected area or cancel.")
 
         capture_rect = self._capture_button_rect()
         cancel_rect = self._cancel_button_rect()
@@ -677,7 +710,7 @@ class ScreenshotOverlayWidget(QWidget):
         painter.setBrush(QColor("#2563eb"))
         painter.drawRoundedRect(capture_rect, 8, 8)
         painter.setPen(QColor("white"))
-        painter.drawText(capture_rect, Qt.AlignCenter, "Capture Selected Area")
+        painter.drawText(capture_rect, Qt.AlignCenter, "Capture Area")
 
         painter.setBrush(QColor("#eef2f7"))
         painter.drawRoundedRect(cancel_rect, 8, 8)
@@ -985,7 +1018,7 @@ class ScreenshotSelectorDialog(QDialog):
         title = QLabel("Drag to select the area you want to capture")
         title.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
 
-        hint = QLabel("Release the mouse, then click 'Capture Selected Area'.")
+        hint = QLabel("Release the mouse, then click 'Capture Area'.")
         hint.setStyleSheet("font-size: 11px; color: #4b5563;")
 
         screen = QApplication.primaryScreen()
@@ -1016,7 +1049,7 @@ class ScreenshotSelectorDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.addStretch()
 
-        capture_button = QPushButton("Capture Selected Area")
+        capture_button = QPushButton("Capture Area")
         capture_button.setFixedSize(170, 32)
         capture_button.setCursor(Qt.PointingHandCursor)
         capture_button.setAutoDefault(False)
@@ -1190,6 +1223,7 @@ class SleepSenseDashboard(QMainWindow):
         self.current_patient_db_id = None
         self.report_interpretation_selected_items = []
         self.report_interpretation_custom_note = ""
+        self._patient_panel_open_width = None
         
         # Global event navigation system
         self.current_event_index = -1  # Global pointer for event navigation
@@ -1378,6 +1412,8 @@ class SleepSenseDashboard(QMainWindow):
         """Collapse the patient panel into a narrow rail instead of hiding it."""
         if not hasattr(self, "main_splitter"):
             return
+        if self.patient_info.isVisible() and self.patient_panel.width() > PATIENT_PANEL_RAIL_WIDTH:
+            self._patient_panel_open_width = self.patient_panel.width()
         self._set_patient_panel_collapsed(True)
         total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
         self.main_splitter.setSizes([
@@ -1391,9 +1427,10 @@ class SleepSenseDashboard(QMainWindow):
             return
         self._set_patient_panel_collapsed(False)
         total_width = max(1, self.main_splitter.width() - self.main_splitter.handleWidth())
+        open_width = self._patient_panel_open_width or PATIENT_PANEL_OPEN_WIDTH
         self.main_splitter.setSizes([
-            PATIENT_PANEL_OPEN_WIDTH,
-            max(1, total_width - PATIENT_PANEL_OPEN_WIDTH),
+            open_width,
+            max(1, total_width - open_width),
         ])
 
     def toggle_patient_panel(self):
@@ -1547,7 +1584,7 @@ class SleepSenseDashboard(QMainWindow):
                 border: 1px solid #d1d5db;
                 border-radius: 6px;
                 padding: 4px;
-                margin: 4px 8px;
+                margin: 0 8px;
             }
         """)
         controls_layout = QHBoxLayout(controls_container)
@@ -2309,7 +2346,7 @@ class SleepSenseDashboard(QMainWindow):
         """)
         self.interpretation_btn.clicked.connect(self.open_interpretation)
         self.interpretation_btn.setEnabled(False)
-        toolbar.addWidget(self.interpretation_btn)
+        self.interpretation_action = toolbar.addWidget(self.interpretation_btn)
         
         # self.action_event_list = QAction(QIcon(os.path.join(script_dir, icons[7]["icon"])), "Event List", self)
         # self.action_event_list.setToolTip("Event List")
@@ -2389,8 +2426,11 @@ class SleepSenseDashboard(QMainWindow):
             tool_button.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
 
         interpretation_btn = getattr(self, "interpretation_btn", None)
+        interpretation_action = getattr(self, "interpretation_action", None)
+        if interpretation_action is not None:
+            interpretation_action.setVisible(bool(active))
         if interpretation_btn is not None:
-            interpretation_btn.setVisible(True)
+            interpretation_btn.setVisible(bool(active))
             interpretation_btn.setEnabled(bool(active))
             interpretation_btn.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
 

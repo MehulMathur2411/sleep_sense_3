@@ -150,7 +150,8 @@ def get_toolbar_qss_styles():
     /* Toolbar Styles */
     QToolBar {
         background-color: #ffffff;
-        border-bottom: 1px solid #e5e7eb;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
         spacing: 2px;
         padding: 4px;
     }

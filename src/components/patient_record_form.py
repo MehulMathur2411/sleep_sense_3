@@ -24,6 +24,8 @@ class PatientRecordForm(QDialog):
     FORM_FIELD_WIDTH = 136
     FORM_FIELD_HEIGHT = 34
     PHONE_PREFIX = "+91 "
+    ADDITIONAL_INFO_CHARACTER_LIMIT = 100
+    NAME_CHARACTER_LIMIT = 10
 
     REQUIRED_LINE_EDIT_STYLE = """
         QLineEdit {
@@ -141,9 +143,11 @@ class PatientRecordForm(QDialog):
         }
     """
 
-    def _create_form_label(self, text):
-        label = QLabel(text)
+    def _create_form_label(self, text, required=False):
+        label = QLabel(f"{text} *" if required else text)
         label.setFixedWidth(self.FORM_LABEL_WIDTH)
+        if required:
+            label.setStyleSheet("color: #b8860b; font-weight: 700;")
         return label
 
     def _apply_uniform_field_size(self, widget):
@@ -160,10 +164,12 @@ class PatientRecordForm(QDialog):
         widget.setValidator(QRegularExpressionValidator(QRegularExpression(pattern), widget))
 
     def _configure_field_limits(self):
-        self.last_name_edit.setMaxLength(50)
-        self.first_name_edit.setMaxLength(50)
+        for editor in (self.last_name_edit, self.first_name_edit):
+            editor.setMaxLength(self.NAME_CHARACTER_LIMIT)
+            editor.setToolTip(f"Maximum {self.NAME_CHARACTER_LIMIT} characters (including spaces)")
         self.patient_id_edit.setMaxLength(20)
-        self._set_regex_validator(self.patient_id_edit, r"[A-Za-z0-9]{0,20}")
+        self._set_regex_validator(self.patient_id_edit, r"[0-9]{1,20}")
+        self.patient_id_edit.setInputMethodHints(Qt.ImhDigitsOnly)
 
         self.title_edit.setMaxLength(20)
         self.street_edit.setMaxLength(100)
@@ -549,14 +555,14 @@ class PatientRecordForm(QDialog):
         self.last_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
         self.last_name_edit.textChanged.connect(self._reset_required_field_styles)
         self._apply_uniform_field_size(self.last_name_edit)
-        layout.addWidget(self._create_form_label("Last name:"), 0, 0)
+        layout.addWidget(self._create_form_label("Last name:", required=True), 0, 0)
         layout.addWidget(self.last_name_edit, 0, 1)
         
         # First Name
         self.first_name_edit = QLineEdit()
-        self._style_default_line_edit(self.first_name_edit)
+        self.first_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
         self._apply_uniform_field_size(self.first_name_edit)
-        layout.addWidget(self._create_form_label("First name:"), 0, 2)
+        layout.addWidget(self._create_form_label("First name:", required=True), 0, 2)
         layout.addWidget(self.first_name_edit, 0, 3)
         self._remember_base_style(self.first_name_edit)
         
@@ -568,16 +574,16 @@ class PatientRecordForm(QDialog):
         self.dob_edit.setStyleSheet(self.REQUIRED_DATE_EDIT_STYLE)
         self.dob_edit.dateChanged.connect(self._reset_required_field_styles)
         self._apply_uniform_field_size(self.dob_edit)
-        layout.addWidget(self._create_form_label("DOB:"), 1, 0)
+        layout.addWidget(self._create_form_label("DOB:", required=True), 1, 0)
         layout.addWidget(self.dob_edit, 1, 1)
         self._remember_base_style(self.dob_edit)
         
         # Patient ID
         self.patient_id_edit = QLineEdit()
         self.patient_id_edit.setPlaceholderText("14021967")
-        self._style_default_line_edit(self.patient_id_edit)
+        self.patient_id_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
         self._apply_uniform_field_size(self.patient_id_edit)
-        layout.addWidget(self._create_form_label("Patient ID:"), 1, 2)
+        layout.addWidget(self._create_form_label("Patient ID:", required=True), 1, 2)
         layout.addWidget(self.patient_id_edit, 1, 3)
         self._remember_base_style(self.patient_id_edit)
         
@@ -840,30 +846,56 @@ class PatientRecordForm(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(10, 15, 10, 10)
         
-        # Referred by doctor
-        self.referred_edit = QTextEdit()
-        self.referred_edit.setMaximumHeight(60)
-        self.referred_edit.setPlaceholderText("Enter referring doctor information...")
-        layout.addWidget(QLabel("Referred by doctor:"))
-        layout.addWidget(self.referred_edit)
-        
-        # History
-        self.history_edit = QTextEdit()
-        self.history_edit.setMaximumHeight(60)
-        self.history_edit.setPlaceholderText("Enter patient medical history...")
-        layout.addWidget(QLabel("History:"))
-        layout.addWidget(self.history_edit)
-        
-        # Comments
-        self.comments_edit = QTextEdit()
-        self.comments_edit.setMaximumHeight(60)
-        self.comments_edit.setPlaceholderText("Enter additional comments...")
-        layout.addWidget(QLabel("Comments:"))
-        layout.addWidget(self.comments_edit)
+        for field, title, placeholder in (
+            ("referred", "Referred by doctor:", "Enter referring doctor information..."),
+            ("history", "History:", "Enter patient medical history..."),
+            ("comments", "Comments:", "Enter additional comments..."),
+        ):
+            header = QHBoxLayout()
+            header.addWidget(QLabel(title))
+            header.addStretch()
+            counter = QLabel(f"0/{self.ADDITIONAL_INFO_CHARACTER_LIMIT} characters")
+            counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            counter.setStyleSheet("color: #6b7280; font-size: 11px;")
+            header.addWidget(counter)
+            layout.addLayout(header)
+
+            editor = QTextEdit()
+            editor.setAcceptRichText(False)
+            editor.setMaximumHeight(60)
+            editor.setPlaceholderText(placeholder)
+            editor.textChanged.connect(
+                lambda edit=editor, label=counter: self._update_additional_info_count(edit, label)
+            )
+            setattr(self, f"{field}_edit", editor)
+            setattr(self, f"{field}_character_count", counter)
+            layout.addWidget(editor)
         
         group.setLayout(layout)
         return group
-    
+
+    def _update_additional_info_count(self, editor, counter):
+        """Update on every character, including spaces and unbroken numbers."""
+        text = editor.toPlainText()
+        limit = self.ADDITIONAL_INFO_CHARACTER_LIMIT
+        if len(text) > limit:
+            end = limit
+            # QTextCursor uses UTF-16 positions, so account for emoji too.
+            end_position = len(text[:end].encode("utf-16-le")) // 2
+            saved_cursor = editor.textCursor()
+            position = min(saved_cursor.position(), end_position)
+            cursor = editor.textCursor()
+            cursor.setPosition(end_position)
+            cursor.movePosition(cursor.End, cursor.KeepAnchor)
+            was_blocked = editor.blockSignals(True)
+            cursor.beginEditBlock()
+            cursor.removeSelectedText()
+            cursor.endEditBlock()
+            cursor.setPosition(position)
+            editor.setTextCursor(cursor)
+            editor.blockSignals(was_blocked)
+        counter.setText(f"{min(len(text), limit)}/{limit} characters")
+
     def create_action_buttons(self):
         """Create Action buttons section"""
         button_container = QFrame()
@@ -975,6 +1007,8 @@ class PatientRecordForm(QDialog):
     def _reset_required_field_styles(self):
         """Restore the default required-field styling after validation feedback."""
         self.last_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
+        self.first_name_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
+        self.patient_id_edit.setStyleSheet(self.REQUIRED_LINE_EDIT_STYLE)
         self.dob_edit.setStyleSheet(self.REQUIRED_DATE_EDIT_STYLE)
     
     def accept_form(self):
@@ -999,6 +1033,10 @@ class PatientRecordForm(QDialog):
         if not self.patient_id_edit.text().strip():
             self._mark_field_invalid(self.patient_id_edit)
             QMessageBox.warning(self, "Validation Error", "Patient ID is required!")
+            return
+        if not self.patient_id_edit.hasAcceptableInput():
+            self._mark_field_invalid(self.patient_id_edit)
+            QMessageBox.warning(self, "Validation Error", "Patient ID must contain only numbers (0–9).")
             return
         
         if not self.dob_edit.date().isValid():
