@@ -4,8 +4,8 @@ Sleep Sense 3 is a PyQt5-based sleep monitoring dashboard for loading PSG-style 
 
 ## What This Project Does
 
-- Loads raw CSV/TXT sleep data into the dashboard
-- Displays signals such as airflow, SpO2, pulse, snoring, thorax, abdomen, body movement, and body position
+- Loads raw .smf sleep data into the dashboard
+- Displays signals such as airflow, SpO2, pulse, snoring, effort , abdomen, body movement, and body position
 - Runs rule-based apnea detection automatically after upload
 - Shows detected events in the patient/event panels and lets you jump to the first event
 
@@ -19,7 +19,7 @@ Sleep Sense 3 is a PyQt5-based sleep monitoring dashboard for loading PSG-style 
 
 1. Install dependencies from `requirements.txt`
 2. Run the app with `python3 main.py`
-3. Upload a CSV or TXT file from the dashboard
+3. Upload a .smf file from the dashboard
 4. The app loads the data, runs rule-based detection, and jumps to the first detected event if one exists
 
 ## Upload Flow
